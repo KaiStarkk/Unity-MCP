@@ -18,11 +18,20 @@ namespace com.IvanMurzak.Unity.MCP.Editor
     [InitializeOnLoad]
     public static partial class Startup
     {
+        // Session state key to track domain reload state (survives domain reload)
+        private const string DomainReloadPendingKey = "UnityMcp_DomainReloadPending";
+
         static Startup()
         {
+            // Check if we're in a domain reload scenario - if so, skip immediate connection
+            // The OnAfterAssemblyReload handler will handle delayed reconnection
+            bool isDomainReloadPending = SessionState.GetBool(DomainReloadPendingKey, false);
+
             UnityMcpPlugin.Instance.BuildMcpPluginIfNeeded();
 
-            if (!EnvironmentUtils.IsCi())
+            // Only connect immediately if this is NOT a domain reload scenario
+            // During domain reload, OnAfterAssemblyReload will handle reconnection with proper delay
+            if (!EnvironmentUtils.IsCi() && !isDomainReloadPending)
                 UnityMcpPlugin.ConnectIfNeeded();
 
             Server.DownloadServerBinaryIfNeeded();

@@ -12,11 +12,16 @@
 using com.IvanMurzak.Unity.MCP.Runtime.Utils;
 using UnityEditor;
 using UnityEngine;
+using System.Threading.Tasks;
 
 namespace com.IvanMurzak.Unity.MCP.Editor
 {
     public static partial class Startup
     {
+        // Delay before reconnecting after domain reload (in milliseconds)
+        // This gives the server time to clear stale invocations from the previous connection
+        private const int DomainReloadReconnectDelayMs = 500;
+
         static void SubscribeOnEditorEvents()
         {
             Application.unloading += OnApplicationUnloading;
@@ -54,10 +59,18 @@ namespace com.IvanMurzak.Unity.MCP.Editor
         }
         static void OnBeforeAssemblyReload()
         {
+            // Set flag to indicate domain reload is pending - this prevents the static constructor
+            // from immediately reconnecting, which would cause "Failed to bind arguments" errors
+            // because SignalR handlers are not yet properly registered after domain reload
+            SessionState.SetBool(DomainReloadPendingKey, true);
+
             if (UnityMcpPlugin.HasInstance)
             {
                 UnityMcpPlugin.Instance.LogInfo("{method} triggered", typeof(Startup), nameof(OnBeforeAssemblyReload));
                 UnityMcpPlugin.Instance.DisconnectImmediate();
+
+                // Fully dispose the plugin to ensure clean state after reload
+                UnityMcpPlugin.StaticDispose();
             }
             else
             {
@@ -74,7 +87,36 @@ namespace com.IvanMurzak.Unity.MCP.Editor
             UnityMcpPlugin.Instance.BuildMcpPluginIfNeeded();
 
             if (connectionAllowed)
-                UnityMcpPlugin.ConnectIfNeeded();
+            {
+                // Use delayed connection to allow the server to clear stale invocations
+                // and ensure SignalR handlers are fully registered before receiving messages
+                EditorApplication.delayCall += () => DelayedReconnectAfterDomainReload();
+            }
+            else
+            {
+                // Clear the domain reload flag since we're not reconnecting
+                SessionState.SetBool(DomainReloadPendingKey, false);
+            }
+        }
+
+        static async void DelayedReconnectAfterDomainReload()
+        {
+            // Wait for a short delay to let any stale server invocations expire
+            await Task.Delay(DomainReloadReconnectDelayMs);
+
+            // Clear the domain reload pending flag
+            SessionState.SetBool(DomainReloadPendingKey, false);
+
+            // Skip if compilation started during the delay
+            if (EditorApplication.isCompiling)
+            {
+                UnityMcpPlugin.Instance.LogTrace("Skipping reconnection - compilation in progress", typeof(Startup));
+                return;
+            }
+
+            UnityMcpPlugin.Instance.LogInfo("Initiating delayed reconnection after domain reload", typeof(Startup));
+            UnityMcpPlugin.Instance.BuildMcpPluginIfNeeded();
+            UnityMcpPlugin.ConnectIfNeeded();
         }
 
         static void OnPlayModeStateChanged(PlayModeStateChange state)
